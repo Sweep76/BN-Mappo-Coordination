@@ -42,7 +42,7 @@ python train_aloha.py train_smac.py --use_annealing --graph_type [dummy, dynamic
 ```
 
 
-
+### Used for comparison between single-agent and multi-agent bayesian networks under tabular exact policy gradients
 ### Acknowledgement
 The MAPPO code is based on https://github.com/marlbenchmark/on-policy
 
