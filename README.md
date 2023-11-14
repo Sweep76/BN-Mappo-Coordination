@@ -1,4 +1,5 @@
 # BNPG
+# CS 3101 PURPOSES
 
 ## Training
 1.  Train fixed DAG topologies with tabular exact policy gradients on Coordination Game
@@ -45,4 +46,3 @@ python train_aloha.py train_smac.py --use_annealing --graph_type [dummy, dynamic
 ### Acknowledgement
 The MAPPO code is based on https://github.com/marlbenchmark/on-policy
 
-The differentiable DAG sampling code is based on https://github.com/sharpenb/Differentiable-DAG-Sampling
