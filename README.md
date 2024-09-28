@@ -1,5 +1,4 @@
 # BNPG
-# CS 3101 PURPOSES
 
 ## Training
 1.  Train fixed DAG topologies with tabular exact policy gradients on Coordination Game
