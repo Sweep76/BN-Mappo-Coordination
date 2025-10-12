@@ -1,3 +1,52 @@
+"""
+Coordination Game with Bayesian Network Policy (Tabular Exact Policy Gradient)
+
+WORKFLOW SUMMARY:
+================
+This module implements a coordination game environment with Bayesian network-based policies
+for multi-agent reinforcement learning using exact policy gradient methods.
+
+Main Components:
+1. Net: Neural network policy model
+   - Supports tabular and Bayesian network policies
+   - Defines parent-child relationships based on graph structure (all_ones, all_zeros, line)
+   - Computes action probabilities conditioned on parent actions
+
+2. CoordinationGame: Main game environment and training loop
+   - Initialization: Sets up game parameters, rewards, transition probabilities
+   - Policy Update Workflow (update_policy method):
+     a. Initialize state transition probabilities (first call only)
+     b. Compute best achievable value (optimal policy, first call only)
+     c. Get action probabilities from Bayesian policy
+     d. Compute Q-values using state-action rewards and transition dynamics
+     e. Compute state visitation distribution (d)
+     f. Calculate Nash Equilibrium gap for each agent
+     g. Compute policy gradient loss
+     h. Backpropagate and update policy parameters
+     i. Return current value, Price of Anarchy (PoA), and NE gap
+
+Key Methods:
+- get_Q(): Solves for Q-values using linear system (Bellman equation)
+- get_V(): Computes state values from Q-values and action probabilities
+- get_d(): Computes stationary state distribution under current policy
+- get_NE_Gap_i(): Calculates Nash Equilibrium gap for agent i (best response improvement)
+- value_iteration(): Iteratively computes optimal value function
+- get_states_probs(): Computes state transition probabilities from action space
+
+Typical Usage:
+--------------
+# Initialize game
+game = CoordinationGame(n=3, epsilon=0.1, gamma=0.95, mu=initial_dist, 
+                        eta=0.01, policy='tabular_baysian', G_type='all_ones')
+
+# Training loop
+for iteration in range(num_iterations):
+    value, poa, ne_gap = game.update_policy()
+    # value: current policy value
+    # poa: Price of Anarchy (ratio to optimal value)
+    # ne_gap: Nash Equilibrium gap (improvement potential)
+"""
+
 import torch
 import numpy as np
 import torch.nn.functional as F
@@ -7,6 +56,18 @@ import torch.nn as nn
 from torch.nn.utils import clip_grad_norm_
 
 class Net(nn.Module):
+    """
+    Bayesian Network Policy Model
+    
+    Implements a policy network with parent-child dependencies defined by a graph structure.
+    Each agent's action probability depends on its parents' actions in the Bayesian network.
+    
+    Args:
+        n: Number of agents
+        policy: Policy type ('tabular' or 'tabular_baysian')
+        G_type: Graph topology ('all_ones', 'all_zeros', or 'line')
+        device: Computing device ('cpu' or 'cuda')
+    """
     def __init__(self, n, policy = 'tabular', G_type = 'all_zeros', device = 'cpu'):
         super(Net, self).__init__()
         # an affine operation: y = Wx + b
@@ -41,6 +102,7 @@ class Net(nn.Module):
             raise NotImplementedError("Not implemented")
     
     def helper(self, i):
+        """Computes action probabilities for agent i conditioned on parent agents"""
         action_probs_i = self.softmax(self.m[i].view(-1,2)) #s * num_parents * 2
         action_probs_i = action_probs_i.view(self.size_s, 2**(len(self.parents[i])), 2)
         shape = [self.size_s]
@@ -87,6 +149,7 @@ class Net(nn.Module):
         return softmax
 
     def forward(self, x):
+        """Forward pass: computes joint action probabilities for all agents"""
         if self.policy == 'tabular':
             return self.m
         elif self.policy == 'tabular_baysian':
@@ -121,6 +184,29 @@ class Net(nn.Module):
             return x
 
 class CoordinationGame():
+    """
+    Multi-Agent Coordination Game with Bayesian Network Policies
+    
+    Implements a tabular coordination game where agents learn policies using
+    exact policy gradient methods. The game features:
+    - Binary state space per agent (2^n total states)
+    - Binary action space per agent (2^n joint actions)
+    - Reward based on state balance (number of 0s vs 1s)
+    - Stochastic state transitions with epsilon noise
+    
+    Args:
+        n: Number of agents
+        epsilon: Transition noise probability
+        gamma: Discount factor
+        mu: Initial state distribution
+        eta: Learning rate
+        policy: Policy type (default 'tabular_baysian')
+        k: Unused parameter (kept for compatibility)
+        lbda: Log barrier coefficient
+        optimizer_type: Optimizer ('SGD' or 'Adam')
+        device: Computing device
+        G_type: Bayesian network graph structure
+    """
     def __init__(self, n, eplison,gamma,mu,eta,policy = 'tabular', k = 1, lbda = 10, optimizer_type = 'SGD', device = 'cpu', G_type = 'all_ones'):
         self.n = n
         self.eta = eta
@@ -161,6 +247,11 @@ class CoordinationGame():
         self.reward_table = self.get_reward(self.l[self.n]) #2**n
 
     def get_reward(self,l):
+        """
+        Generates reward table based on state balance
+        States with balanced 0s and 1s (within threshold l) get rewards 0 or 1
+        Imbalanced states get higher rewards (2 or 3)
+        """
         reward = torch.zeros(self.size_a)
         for i in range(self.size_a):
             state = np.binary_repr(i, self.n)
@@ -217,6 +308,10 @@ class CoordinationGame():
         return p
     
     def get_Q(self, actions_probs):
+        """
+        Computes Q-values by solving the Bellman equation as a linear system
+        Q = (I - γP_π)^(-1) * r
+        """
         r = self.reward_table.view(-1,1).repeat(1,self.size_a)
         r = r.view(-1,1)
         p_pi = self.get_p_pi(actions_probs)
@@ -224,12 +319,14 @@ class CoordinationGame():
         return Q.view(self.size_s,self.size_a)
     
     def get_d(self, actions_probs):
+        """Computes stationary state distribution under current policy"""
         p = self.get_p(actions_probs, self.states_probs)
         temp1 = torch.linalg.solve((torch.eye(2**self.n).to(self.device)-self.gamma*p).T,self.mu).T
         d = (1-self.gamma)*(temp1).view(-1)
         return d
     
     def get_V(self,Q, actions_probs):
+        """Computes state values V(s) = Σ_a π(a|s) Q(s,a)"""
         return (Q * actions_probs).sum(dim=1)
     
     def get_Q_i(self, i, Q, actions_probs): #s*2
@@ -261,12 +358,20 @@ class CoordinationGame():
         actions_probs = torch.stack(actions_probs)
         return actions_probs, probs_per_states
     
-    def get_states_probs(self): #(i,j,k...)*joint action * joint s
+    def get_states_probs(self):
+        """
+        Computes joint state transition probabilities P(s'|s,a)
+        Returns: Tensor of shape (size_a, size_s) representing transitions
+        """
         probs = torch.stack([torch.tensor([1-self.eplison,self.eplison,self.eplison,1-self.eplison]).view(4,1) for i in range(self.n)]).to(self.device)
         states_probs = self.get_joint_probs(probs,rearrange=True).view(self.size_a,self.size_s)
         return states_probs.to(self.device)
     
-    def get_states_probs_i(self): #(i,j,k...)*joint action * joint s
+    def get_states_probs_i(self):
+        """
+        Computes state transition probabilities for each agent i (excluding agent i)
+        Used for computing Nash Equilibrium gaps
+        """
         states_probs_i = {}
         for i in range(self.n):
             probs = torch.stack([torch.tensor([1-self.eplison,self.eplison,self.eplison,1-self.eplison]).view(4,1) for k in range(self.n) if k!=i]).to(self.device)
@@ -275,6 +380,10 @@ class CoordinationGame():
         return states_probs_i
 
     def value_iteration(self,P,r,eps = 1e-4):
+        """
+        Performs value iteration to find optimal value function
+        Used for computing best responses in NE gap calculation
+        """
         Q = torch.zeros(len(r)).to(self.device)
         next_Q = None
         V_Q = 0
@@ -293,6 +402,10 @@ class CoordinationGame():
         return V_max
     
     def value_iteration_global(self,P,r,eps = 1e-4):
+        """
+        Performs global value iteration for computing optimal policy value
+        Used to calculate Price of Anarchy (PoA)
+        """
         Q = torch.zeros(len(r)).to(self.device)
         next_Q = None
         V_Q = 0
@@ -313,7 +426,15 @@ class CoordinationGame():
         V_max = x.values
         return V_max
             
-    def get_NE_Gap_i(self, i, actions_probs): #(i,j,k...)*joint action * joint s
+    def get_NE_Gap_i(self, i, actions_probs):
+        """
+        Computes Nash Equilibrium gap for agent i
+        
+        The NE gap measures how much agent i can improve by best responding
+        while other agents maintain their current policies.
+        
+        Returns: Maximum improvement in value agent i can achieve
+        """
         
         size = 2**(self.n-1)              #s*a
         #for P(s,a_i)
@@ -358,7 +479,27 @@ class CoordinationGame():
         log_barrier_loss = log_barrier_loss.view(-1).sum()
         return log_barrier_loss/self.size_s/2
   
-    def update_policy(self): #s*a
+    def update_policy(self):
+        """
+        Main policy update method using exact policy gradient
+        
+        Workflow:
+        1. Initialize state transition probabilities (first call only)
+        2. Compute optimal value for Price of Anarchy (first call only)
+        3. Get current action probabilities from Bayesian policy
+        4. Compute Q-values using Bellman equation
+        5. Compute state values V(s)
+        6. Compute objective J = μ^T V
+        7. Compute stationary state distribution d
+        8. Calculate Nash Equilibrium gap for each agent
+        9. Compute policy gradient loss: -1/(1-γ) * d * Q * π
+        10. Backpropagate and update parameters
+        
+        Returns:
+            J: Current policy value
+            PoA: Price of Anarchy (ratio of current to optimal value)
+            NE_Gap: Nash Equilibrium gap (maximum improvement potential)
+        """
         if self.states_probs == None:
             self.states_probs = self.get_states_probs()
             self.states_probs_i = self.get_states_probs_i()
